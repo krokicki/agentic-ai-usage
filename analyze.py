@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -117,7 +118,21 @@ def model_family(name):
         return "Sonnet"
     if name.startswith("claude-haiku"):
         return "Haiku"
-    return "Codex"  # gpt-*, and any other non-Claude vendor
+    return "Other"  # <synthetic> etc. (Codex is tagged directly in parse_codex)
+
+
+def model_label(name):
+    """Family + version, e.g. 'claude-opus-4-7' -> 'Opus 4.7'.
+
+    Falls back to the bare family when no version is encoded in the id.
+    """
+    fam = model_family(name)
+    if fam == "Other":
+        return "Other"
+    parts = name.split("-")  # claude-<family>-<major>-<minor>[-date]
+    if len(parts) >= 4 and parts[2].isdigit() and parts[3].isdigit():
+        return f"{fam} {parts[2]}.{parts[3]}"
+    return fam
 
 
 def parse_claude(claude_dir):
@@ -151,10 +166,12 @@ def parse_claude(claude_dir):
             if tok <= 0:
                 continue
             cwd = o.get("cwd")
+            name = msg.get("model", "")
             yield {
                 "date": ts[:10],
                 "project": os.path.basename(cwd) if cwd else "unknown",
-                "family": model_family(msg.get("model", "")),
+                "family": model_family(name),
+                "model": model_label(name),
                 "tokens": tok,
                 "input": inp, "output": out,
                 "cache_create": cc, "cache_read": cr,
@@ -197,6 +214,7 @@ def parse_codex(codex_dir):
                 "date": ts[:10],
                 "project": os.path.basename(cwd) if cwd else "unknown",
                 "family": "Codex",
+                "model": "Codex",  # Codex logs carry no model id
                 "tokens": tok,
                 "input": max(last.get("input_tokens", 0) - cached, 0),
                 "output": last.get("output_tokens", 0),
@@ -223,12 +241,52 @@ def collect_usage(claude_dir, codex_dir):
 # ----------------------------------------------------------------------------
 # aggregation helpers
 # ----------------------------------------------------------------------------
-def by_period_family(records, key):
-    """period -> {family: tokens}. key(date) selects month ('%Y-%m') or day."""
+def by_period_group(records, key, group="model"):
+    """period -> {value: tokens}. key(date) selects month ('%Y-%m') or day;
+    group selects the field to stack by ('model' or 'family')."""
     agg = defaultdict(lambda: defaultdict(int))
     for r in records:
-        agg[key(r["date"])][r["family"]] += r["tokens"]
+        agg[key(r["date"])][r[group]] += r["tokens"]
     return agg
+
+
+def _version_key(label):
+    """Sort key for a model label like 'Opus 4.7' -> 4.7 (family-less -> 0)."""
+    tail = label.rsplit(" ", 1)
+    try:
+        return float(tail[1])
+    except (IndexError, ValueError):
+        return 0.0
+
+
+def _shades(base, n):
+    """n colors from one base hue; ordered older/darker -> newer/lighter."""
+    rgb = np.array(mcolors.to_rgb(base))
+    if n == 1:
+        return [base]
+    out = []
+    for f in np.linspace(-0.30, 0.45, n):
+        c = rgb + (1 - rgb) * f if f >= 0 else rgb * (1 + f)
+        out.append(mcolors.to_hex(np.clip(c, 0, 1)))
+    return out
+
+
+def model_order_and_colors(records):
+    """Stacking order (family order, then version ascending) and a color per
+    model, shaded within each family's base hue."""
+    by_fam = defaultdict(set)
+    for r in records:
+        by_fam[r["family"]].add(r["model"])
+    order, colors = [], {}
+    for fam in FAMILIES + [f for f in by_fam if f not in FAMILIES]:
+        if fam not in by_fam:
+            continue
+        models = sorted(by_fam[fam], key=_version_key)
+        for m, c in zip(models, _shades(MODEL_COLORS.get(fam, "#7e8a99"),
+                                        len(models))):
+            order.append(m)
+            colors[m] = c
+    return order, colors
 
 
 def cost_by_period_component(records, key):
@@ -254,24 +312,25 @@ def by_date_project(records):
 # charts
 # ----------------------------------------------------------------------------
 def chart_monthly(records, out_dir):
-    agg = by_period_family(records, lambda d: d[:7])
+    order, colors = model_order_and_colors(records)
+    agg = by_period_group(records, lambda d: d[:7])
     months = sorted(agg)
     fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
     bottom = np.zeros(len(months))
     used = []
-    for f in FAMILIES:
-        vals = np.array([agg[m].get(f, 0) for m in months])
+    for name in order:
+        vals = np.array([agg[mo].get(name, 0) for mo in months])
         if vals.sum() == 0:
             continue
-        ax.bar(months, vals, bottom=bottom, color=MODEL_COLORS[f],
-               width=0.62, label=f)
+        ax.bar(months, vals, bottom=bottom, color=colors[name],
+               width=0.62, label=name)
         bottom += vals
-        used.append(f)
+        used.append(name)
     for i, t in enumerate(bottom):
         ax.text(i, t, " " + fmt_tokens(t), ha="center", va="bottom",
                 fontsize=10, fontweight="bold", color="#e6edf3")
     style_axis(ax)
-    _legend(ax, used, MODEL_COLORS)
+    _legend(ax, used, colors)
     ax.set_title("AI Token Usage — Monthly (stacked by model)", loc="left", pad=14)
     ax.set_ylim(0, bottom.max() * 1.12)
     _save(fig, out_dir, "usage_monthly.png")
@@ -308,40 +367,43 @@ def chart_cost(records, out_dir):
 
 
 def chart_daily(records, out_dir):
-    agg = by_period_family(records, lambda d: d)
+    order, colors = model_order_and_colors(records)
+    agg = by_period_group(records, lambda d: d)
     dates = sorted(agg)
     dts = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
     fig, ax = plt.subplots(figsize=(13, 5.6), dpi=160)
     bottom = np.zeros(len(dts))
     used = []
-    for f in FAMILIES:
-        vals = np.array([agg[d].get(f, 0) for d in dates])
+    for name in order:
+        vals = np.array([agg[d].get(name, 0) for d in dates])
         if vals.sum() == 0:
             continue
-        ax.bar(dts, vals, bottom=bottom, color=MODEL_COLORS[f], width=0.9, label=f)
+        ax.bar(dts, vals, bottom=bottom, color=colors[name], width=0.9,
+               label=name)
         bottom += vals
-        used.append(f)
+        used.append(name)
     style_axis(ax)
-    _legend(ax, used, MODEL_COLORS)
+    _legend(ax, used, colors)
     _date_axis(ax, dts)
     ax.set_title("AI Token Usage — Daily (stacked by model)", loc="left", pad=14)
     _save(fig, out_dir, "usage_daily.png")
 
 
 def chart_rolling(records, out_dir, window=3):
-    agg = by_period_family(records, lambda d: d)
+    order, colors = model_order_and_colors(records)
+    agg = by_period_group(records, lambda d: d)
     dates = sorted(agg)
     start = datetime.strptime(dates[0], "%Y-%m-%d")
     end = datetime.strptime(dates[-1], "%Y-%m-%d")
     ndays = (end - start).days + 1
     alld = [start + timedelta(days=i) for i in range(ndays)]
     idx = {d.strftime("%Y-%m-%d"): i for i, d in enumerate(alld)}
-    series = {f: np.zeros(ndays) for f in FAMILIES}
+    series = {name: np.zeros(ndays) for name in order}
     total = np.zeros(ndays)
     for d in dates:
         i = idx[d]
-        for f, t in agg[d].items():
-            series[f][i] += t
+        for name, t in agg[d].items():
+            series[name][i] += t
             total[i] += t
 
     def roll(a):
@@ -350,11 +412,11 @@ def chart_rolling(records, out_dir, window=3):
     fig, ax = plt.subplots(figsize=(13, 5.6), dpi=160)
     ax.plot(alld, roll(total), color="#58a6ff", lw=2.6, label="Total", zorder=5)
     ax.fill_between(alld, roll(total), color="#58a6ff", alpha=0.08)
-    for f in FAMILIES:
-        if series[f].sum() == 0:
+    for name in order:
+        if series[name].sum() == 0:
             continue
-        ax.plot(alld, roll(series[f]), color=MODEL_COLORS[f], lw=1.8,
-                label=f, alpha=0.95)
+        ax.plot(alld, roll(series[name]), color=colors[name], lw=1.8,
+                label=name, alpha=0.95)
     style_axis(ax)
     ax.set_ylabel(f"Tokens / day ({window}-day avg)")
     ax.legend(loc="upper left", frameon=False, labelcolor="#e6edf3",

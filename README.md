@@ -50,8 +50,10 @@ pixi run python analyze.py all --claude-dir ~/.claude/projects --codex-dir ''
 - Token counts include cache reads/writes, which dominate the totals. Because
   cache reads are billed at ~0.1x the input rate, the token charts overstate
   cost differences — use the `cost` chart for a cost-representative view.
-- Claude models are grouped into Opus / Sonnet / Haiku; all Codex (GPT) models
-  are grouped as "Codex".
+- The model charts stack by specific version (e.g. `Opus 4.7`, `Haiku 4.5`),
+  parsed from the logged model id and shaded within each family's color (older
+  = darker, newer = lighter). Codex logs carry no model id, so they show as a
+  single "Codex"; pricing is still applied per family.
 - Codex usage is summed from per-turn `last_token_usage` deltas to avoid
   double-counting the cumulative `total_token_usage`.
 
