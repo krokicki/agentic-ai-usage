@@ -9,39 +9,39 @@ from local agent logs** — no external tools or network access required.
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl` |
 
 Most charts plot **time on the X axis, tokens on the Y axis**; the `cost` chart
-plots **estimated USD** on the Y axis instead.
+plots **estimated USD** instead. Every chart kind is rendered at two
+granularities — **monthly** and **daily** — into separate PNGs.
 
 ## Usage
 
 ```bash
-pixi run all        # generate every chart into ./charts
-pixi run monthly    # monthly tokens, stacked by model
-pixi run daily      # daily tokens, stacked by model
-pixi run rolling    # 3-day rolling average, line per model + total
-pixi run projects   # daily tokens, stacked by project (top 11 + "other")
-pixi run tokentype  # monthly tokens, stacked by token type
-pixi run context    # monthly avg cache reads per request, Claude (context proxy)
-pixi run cost       # monthly estimated cost (USD), stacked by token type
+pixi run all        # generate every chart (monthly + daily) into ./charts
+pixi run models     # tokens, stacked by model version
+pixi run tokentype  # tokens, stacked by token type
+pixi run worktokens # tokens, stacked by token type, excluding cache reads
+pixi run context    # avg cache reads per request, Claude (context-size proxy)
+pixi run cost       # estimated cost (USD), stacked by token type
+pixi run projects   # tokens, stacked by project (top 11 + "other")
 ```
 
-Charts are written to `./charts/*.png`.
+Each kind writes `usage_<kind>_monthly.png` and `usage_<kind>_daily.png` to
+`./charts/`.
 
-| Chart | File |
-|-------|------|
-| `monthly`  | `usage_monthly.png` |
-| `daily`    | `usage_daily.png` |
-| `rolling`  | `usage_rolling3d.png` |
-| `projects` | `usage_daily_by_project.png` |
-| `tokentype`| `usage_tokens_by_type.png` |
-| `context`  | `usage_context_per_request.png` |
-| `cost`     | `usage_cost_monthly.png` |
+| Chart kind | Files |
+|------------|-------|
+| `models`     | `usage_models_{monthly,daily}.png` |
+| `tokentype`  | `usage_tokentype_{monthly,daily}.png` |
+| `worktokens` | `usage_worktokens_{monthly,daily}.png` |
+| `context`    | `usage_context_{monthly,daily}.png` |
+| `cost`       | `usage_cost_{monthly,daily}.png` |
+| `projects`   | `usage_projects_{monthly,daily}.png` |
 
 ### Options
 
 Run the script directly for more control:
 
 ```bash
-pixi run python analyze.py daily projects --out-dir /tmp/charts
+pixi run python analyze.py models projects --out-dir /tmp/charts
 pixi run python analyze.py all --claude-dir ~/.claude/projects --codex-dir ''
 ```
 

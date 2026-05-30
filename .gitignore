@@ -4,3 +4,5 @@ charts/
 pixi.lock
 __pycache__/
 .DS_Store
+
+notes/

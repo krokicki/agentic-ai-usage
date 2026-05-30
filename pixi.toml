@@ -11,10 +11,9 @@ numpy = ">=1.26"
 
 [tasks]
 all = "python analyze.py all"
-monthly = "python analyze.py monthly"
-daily = "python analyze.py daily"
-rolling = "python analyze.py rolling"
-projects = "python analyze.py projects"
+models = "python analyze.py models"
 tokentype = "python analyze.py tokentype"
+worktokens = "python analyze.py worktokens"
 context = "python analyze.py context"
 cost = "python analyze.py cost"
+projects = "python analyze.py projects"

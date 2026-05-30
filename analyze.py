@@ -106,15 +106,6 @@ def fmt_dollars(x, _=None):
     return f"${x:.0f}"
 
 
-def style_axis(ax):
-    ax.grid(axis="y", color="#30363d", linewidth=0.7, alpha=0.6)
-    ax.set_axisbelow(True)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-    ax.yaxis.set_major_formatter(FuncFormatter(fmt_tokens))
-    ax.set_ylabel("Tokens")
-
-
 # ----------------------------------------------------------------------------
 # log parsing  ->  flat list of usage records {date, project, family, tokens}
 # ----------------------------------------------------------------------------
@@ -316,99 +307,93 @@ def tokens_by_period_component(records, key):
     return agg
 
 
-def by_date_project(records):
-    agg = defaultdict(lambda: defaultdict(int))
-    proj_total = defaultdict(int)
-    for r in records:
-        agg[r["date"]][r["project"]] += r["tokens"]
-        proj_total[r["project"]] += r["tokens"]
-    return agg, proj_total
-
-
 # ----------------------------------------------------------------------------
-# charts
+# charts  (each kind renders for a period: "monthly" or "daily")
 # ----------------------------------------------------------------------------
-def chart_monthly(records, out_dir):
-    order, colors = model_order_and_colors(records)
-    agg = by_period_group(records, lambda d: d[:7])
-    months = sorted(agg)
-    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
-    bottom = np.zeros(len(months))
-    used = []
-    for name in order:
-        vals = np.array([agg[mo].get(name, 0) for mo in months])
-        if vals.sum() == 0:
-            continue
-        ax.bar(months, vals, bottom=bottom, color=colors[name],
-               width=0.62, label=name)
-        bottom += vals
-        used.append(name)
-    for i, t in enumerate(bottom):
-        ax.text(i, t, " " + fmt_tokens(t), ha="center", va="bottom",
-                fontsize=10, fontweight="bold", color="#e6edf3")
-    style_axis(ax)
-    _legend(ax, used, colors)
-    ax.set_title("AI Token Usage — Monthly (stacked by model)", loc="left", pad=14)
-    ax.set_ylim(0, bottom.max() * 1.12)
-    _save(fig, out_dir, "usage_monthly.png")
+def _keyfn(period):
+    """date string -> bucket key: month ('%Y-%m') for monthly, full day else."""
+    return (lambda d: d[:7]) if period == "monthly" else (lambda d: d)
 
 
-def chart_cost(records, out_dir):
-    agg = cost_by_period_component(records, lambda d: d[:7])
-    months = sorted(agg)
-    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
-    bottom = np.zeros(len(months))
-    used = []
-    for comp in COST_COMPONENTS:
-        vals = np.array([agg[m].get(comp, 0.0) for m in months])
-        if vals.sum() == 0:
-            continue
-        ax.bar(months, vals, bottom=bottom, color=COMPONENT_COLORS[comp],
-               width=0.62, label=comp)
-        bottom += vals
-        used.append(comp)
-    for i, t in enumerate(bottom):
-        ax.text(i, t, " " + fmt_dollars(t), ha="center", va="bottom",
-                fontsize=10, fontweight="bold", color="#e6edf3")
+def _bar_x(keys, period):
+    """x positions and bar width: categorical months or datetime days."""
+    if period == "monthly":
+        return list(keys), 0.62
+    return [datetime.strptime(k, "%Y-%m-%d") for k in keys], 0.9
+
+
+def _value_axis(ax, fmt, ylabel):
     ax.grid(axis="y", color="#30363d", linewidth=0.7, alpha=0.6)
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    ax.yaxis.set_major_formatter(FuncFormatter(fmt_dollars))
-    ax.set_ylabel("Estimated cost (USD)")
-    _legend(ax, used, COMPONENT_COLORS)
-    ax.set_title("AI Cost — Monthly est. (stacked by token type)",
-                 loc="left", pad=14)
-    ax.set_ylim(0, bottom.max() * 1.12)
-    _save(fig, out_dir, "usage_cost_monthly.png")
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt))
+    ax.set_ylabel(ylabel)
 
 
-def chart_tokentype(records, out_dir):
-    agg = tokens_by_period_component(records, lambda d: d[:7])
-    months = sorted(agg)
-    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
-    bottom = np.zeros(len(months))
+def _draw_stacked(agg, order, colors, period, *, out_dir, fname, title,
+                  fmt=fmt_tokens, ylabel="Tokens", labels=None, ncol=1):
+    """Render and save one stacked-bar chart for the given period."""
+    keys = sorted(agg)
+    x, width = _bar_x(keys, period)
+    fig, ax = plt.subplots(figsize=(10, 5.6) if period == "monthly"
+                           else (13, 5.6), dpi=160)
+    label_of = (lambda n: labels.get(n, n)) if labels else (lambda n: n)
+    bottom = np.zeros(len(keys))
     used = []
-    for comp in COST_COMPONENTS:
-        vals = np.array([agg[m].get(comp, 0) for m in months])
+    for name in order:
+        vals = np.array([agg[k].get(name, 0) for k in keys])
         if vals.sum() == 0:
             continue
-        ax.bar(months, vals, bottom=bottom, color=COMPONENT_COLORS[comp],
-               width=0.62, label=comp)
+        ax.bar(x, vals, bottom=bottom, color=colors[name], width=width,
+               label=label_of(name))
         bottom += vals
-        used.append(comp)
-    for i, t in enumerate(bottom):
-        ax.text(i, t, " " + fmt_tokens(t), ha="center", va="bottom",
-                fontsize=10, fontweight="bold", color="#e6edf3")
-    style_axis(ax)
-    _legend(ax, used, COMPONENT_COLORS)
-    ax.set_title("AI Token Usage — Monthly (stacked by token type)",
-                 loc="left", pad=14)
-    ax.set_ylim(0, bottom.max() * 1.12)
-    _save(fig, out_dir, "usage_tokens_by_type.png")
+        used.append(name)
+    if period == "monthly":
+        for i, t in enumerate(bottom):
+            ax.text(i, t, " " + fmt(t), ha="center", va="bottom",
+                    fontsize=10, fontweight="bold", color="#e6edf3")
+        ax.set_ylim(0, (bottom.max() or 1) * 1.12)
+    else:
+        _date_axis(ax, x)
+    _value_axis(ax, fmt, ylabel)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=colors[n]) for n in used]
+    ax.legend(handles, [label_of(n) for n in used], loc="upper left",
+              frameon=False, labelcolor="#e6edf3",
+              fontsize=11 if ncol == 1 else 10, ncol=ncol)
+    ax.set_title(title, loc="left", pad=14)
+    _save(fig, out_dir, fname)
 
 
-def chart_context(records, out_dir):
+def chart_models(records, out_dir, period):
+    order, colors = model_order_and_colors(records)
+    agg = by_period_group(records, _keyfn(period))
+    _draw_stacked(agg, order, colors, period, out_dir=out_dir,
+                  fname=f"usage_models_{period}.png",
+                  title=f"AI Token Usage — {period.title()} (stacked by model)")
+
+
+def chart_tokentype(records, out_dir, period, *, exclude_cache_read=False):
+    agg = tokens_by_period_component(records, _keyfn(period))
+    order = [c for c in COST_COMPONENTS
+             if not (exclude_cache_read and c == "Cache read")]
+    kind = "worktokens" if exclude_cache_read else "tokentype"
+    extra = ", excl. cache reads" if exclude_cache_read else ""
+    _draw_stacked(agg, order, COMPONENT_COLORS, period, out_dir=out_dir,
+                  fname=f"usage_{kind}_{period}.png",
+                  title=f"AI Token Usage — {period.title()} "
+                        f"(by token type{extra})")
+
+
+def chart_cost(records, out_dir, period):
+    agg = cost_by_period_component(records, _keyfn(period))
+    _draw_stacked(agg, COST_COMPONENTS, COMPONENT_COLORS, period,
+                  out_dir=out_dir, fname=f"usage_cost_{period}.png",
+                  title=f"AI Cost — {period.title()} est. (by token type)",
+                  fmt=fmt_dollars, ylabel="Estimated cost (USD)")
+
+
+def chart_context(records, out_dir, period):
     """Avg cache-read tokens per request — a proxy for context size per turn.
 
     Cache reads dominate any agentic session, so their *per-request* size is
@@ -416,130 +401,66 @@ def chart_context(records, out_dir):
     Claude, whose caching is comparable across requests (Codex logs report
     caching differently and would dilute the average).
     """
+    keyfn = _keyfn(period)
     cr = defaultdict(int)
     n = defaultdict(int)
     for r in records:
         if r["family"] == "Codex":
             continue
-        m = r["date"][:7]
-        cr[m] += r["cache_read"]
-        n[m] += 1
-    months = sorted(cr)
-    vals = np.array([cr[m] / n[m] for m in months])
-    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
-    ax.bar(months, vals, color=COMPONENT_COLORS["Cache read"], width=0.62)
-    for i, v in enumerate(vals):
-        ax.text(i, v, " " + fmt_tokens(v), ha="center", va="bottom",
-                fontsize=10, fontweight="bold", color="#e6edf3")
-    style_axis(ax)
-    ax.set_ylabel("Avg cache-read tokens / request")
-    ax.set_title("Context per Request — Monthly (avg cache reads / request, "
-                 "Claude only)", loc="left", pad=14)
-    ax.set_ylim(0, vals.max() * 1.12)
-    _save(fig, out_dir, "usage_context_per_request.png")
-
-
-def chart_daily(records, out_dir):
-    order, colors = model_order_and_colors(records)
-    agg = by_period_group(records, lambda d: d)
-    dates = sorted(agg)
-    dts = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
-    fig, ax = plt.subplots(figsize=(13, 5.6), dpi=160)
-    bottom = np.zeros(len(dts))
-    used = []
-    for name in order:
-        vals = np.array([agg[d].get(name, 0) for d in dates])
-        if vals.sum() == 0:
-            continue
-        ax.bar(dts, vals, bottom=bottom, color=colors[name], width=0.9,
-               label=name)
-        bottom += vals
-        used.append(name)
-    style_axis(ax)
-    _legend(ax, used, colors)
-    _date_axis(ax, dts)
-    ax.set_title("AI Token Usage — Daily (stacked by model)", loc="left", pad=14)
-    _save(fig, out_dir, "usage_daily.png")
-
-
-def chart_rolling(records, out_dir, window=3):
-    order, colors = model_order_and_colors(records)
-    agg = by_period_group(records, lambda d: d)
-    dates = sorted(agg)
-    start = datetime.strptime(dates[0], "%Y-%m-%d")
-    end = datetime.strptime(dates[-1], "%Y-%m-%d")
-    ndays = (end - start).days + 1
-    alld = [start + timedelta(days=i) for i in range(ndays)]
-    idx = {d.strftime("%Y-%m-%d"): i for i, d in enumerate(alld)}
-    series = {name: np.zeros(ndays) for name in order}
-    total = np.zeros(ndays)
-    for d in dates:
-        i = idx[d]
-        for name, t in agg[d].items():
-            series[name][i] += t
-            total[i] += t
-
-    def roll(a):
-        return np.convolve(a, np.ones(window) / window, mode="same")
-
-    fig, ax = plt.subplots(figsize=(13, 5.6), dpi=160)
-    ax.plot(alld, roll(total), color="#58a6ff", lw=2.6, label="Total", zorder=5)
-    ax.fill_between(alld, roll(total), color="#58a6ff", alpha=0.08)
-    for name in order:
-        if series[name].sum() == 0:
-            continue
-        ax.plot(alld, roll(series[name]), color=colors[name], lw=1.8,
-                label=name, alpha=0.95)
-    style_axis(ax)
-    ax.set_ylabel(f"Tokens / day ({window}-day avg)")
-    ax.legend(loc="upper left", frameon=False, labelcolor="#e6edf3",
-              fontsize=11, ncol=2)
-    _date_axis(ax, alld, minor=False)
-    ax.set_title(f"AI Token Usage — {window}-Day Rolling Average",
+        k = keyfn(r["date"])
+        cr[k] += r["cache_read"]
+        n[k] += 1
+    keys = sorted(cr)
+    vals = np.array([cr[k] / n[k] for k in keys])
+    x, width = _bar_x(keys, period)
+    fig, ax = plt.subplots(figsize=(10, 5.6) if period == "monthly"
+                           else (13, 5.6), dpi=160)
+    ax.bar(x, vals, color=COMPONENT_COLORS["Cache read"], width=width)
+    if period == "monthly":
+        for i, v in enumerate(vals):
+            ax.text(i, v, " " + fmt_tokens(v), ha="center", va="bottom",
+                    fontsize=10, fontweight="bold", color="#e6edf3")
+        ax.set_ylim(0, (vals.max() or 1) * 1.12)
+    else:
+        _date_axis(ax, x)
+    _value_axis(ax, fmt_tokens, "Avg cache-read tokens / request")
+    ax.set_title(f"Context per Request — {period.title()} "
+                 f"(avg cache reads / request, Claude only)",
                  loc="left", pad=14)
-    _save(fig, out_dir, "usage_rolling3d.png")
+    _save(fig, out_dir, f"usage_context_{period}.png")
 
 
-def chart_projects(records, out_dir, top_n=11):
-    agg, proj_total = by_date_project(records)
+def chart_projects(records, out_dir, period, top_n=11):
+    keyfn = _keyfn(period)
+    agg = defaultdict(lambda: defaultdict(int))
+    proj_total = defaultdict(int)
+    for r in records:
+        agg[keyfn(r["date"])][r["project"]] += r["tokens"]
+        proj_total[r["project"]] += r["tokens"]
     ranked = sorted(proj_total.items(), key=lambda x: -x[1])
-    top = [p for p, _ in ranked[:top_n]]
-    order = top + (["other"] if len(ranked) > top_n else [])
-    dates = sorted(agg)
-    dts = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
-    series = {p: np.zeros(len(dates)) for p in order}
-    for i, d in enumerate(dates):
-        for proj, tok in agg[d].items():
-            series[proj if proj in top else "other"][i] += tok
+    top = {p for p, _ in ranked[:top_n]}
+    has_other = len(ranked) > top_n
+    collapsed = defaultdict(lambda: defaultdict(int))
+    for k, projs in agg.items():
+        for proj, tok in projs.items():
+            collapsed[k][proj if proj in top else "other"] += tok
+    order = [p for p, _ in ranked[:top_n]] + (["other"] if has_other else [])
     colors = {p: PALETTE[i % len(PALETTE)] for i, p in enumerate(order)}
-    if "other" in series:
+    labels = {}
+    if has_other:
         colors["other"] = "#5a6473"
-
-    fig, ax = plt.subplots(figsize=(13.5, 6.2), dpi=160)
-    other_label = f"other ({len(ranked) - top_n} projects)"
-    bottom = np.zeros(len(dts))
-    for p in order:
-        ax.bar(dts, series[p], bottom=bottom, color=colors[p], width=0.9,
-               label=p if p != "other" else other_label)
-        bottom += series[p]
-    style_axis(ax)
-    _date_axis(ax, dts)
-    ax.set_title("AI Token Usage — Daily (stacked by project)", loc="left", pad=14)
-    ax.legend(loc="upper left", frameon=False, labelcolor="#e6edf3",
-              fontsize=10, ncol=2)
-    _save(fig, out_dir, "usage_daily_by_project.png")
-    print(f"  {len(ranked)} projects total; top {top_n} shown")
+        labels["other"] = f"other ({len(ranked) - top_n} projects)"
+    _draw_stacked(collapsed, order, colors, period, out_dir=out_dir,
+                  fname=f"usage_projects_{period}.png",
+                  title=f"AI Token Usage — {period.title()} "
+                        f"(stacked by project)", labels=labels, ncol=2)
+    if period == "monthly":
+        print(f"  {len(ranked)} projects total; top {top_n} shown")
 
 
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------
-def _legend(ax, fams, colors):
-    handles = [plt.Rectangle((0, 0), 1, 1, color=colors[f]) for f in fams]
-    ax.legend(handles, fams, loc="upper left", frameon=False,
-              labelcolor="#e6edf3", fontsize=11)
-
-
 def _date_axis(ax, dts, minor=True):
     ax.xaxis.set_major_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
@@ -558,15 +479,26 @@ def _save(fig, out_dir, name):
 
 
 # ----------------------------------------------------------------------------
+CHART_KINDS = {
+    "models":     lambda r, o, p: chart_models(r, o, p),
+    "tokentype":  lambda r, o, p: chart_tokentype(r, o, p),
+    "worktokens": lambda r, o, p: chart_tokentype(r, o, p,
+                                                   exclude_cache_read=True),
+    "context":    lambda r, o, p: chart_context(r, o, p),
+    "cost":       lambda r, o, p: chart_cost(r, o, p),
+    "projects":   lambda r, o, p: chart_projects(r, o, p),
+}
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("charts", nargs="*",
-                   choices=["monthly", "daily", "rolling", "projects",
-                            "tokentype", "context", "cost", "all"],
+                   choices=list(CHART_KINDS) + ["all"],
                    default=["all"],
-                   help="which chart(s) to generate (default: all)")
+                   help="chart kind(s) to generate (default: all); each kind "
+                        "produces a monthly and a daily PNG")
     p.add_argument("--out-dir", default=os.path.join(here, "charts"),
                    help="output directory for PNGs (default: ./charts)")
     p.add_argument("--claude-dir", default=os.path.expanduser("~/.claude/projects"),
@@ -575,10 +507,9 @@ def main():
                    help="Codex sessions log directory (use '' to skip Codex)")
     args = p.parse_args()
 
-    wanted = set(args.charts)
-    if "all" in wanted:
-        wanted = {"monthly", "daily", "rolling", "projects", "tokentype",
-                  "context", "cost"}
+    sel = set(args.charts)
+    kinds = list(CHART_KINDS) if "all" in sel else \
+        [k for k in CHART_KINDS if k in sel]
 
     records = collect_usage(args.claude_dir, args.codex_dir or "")
     total = sum(r["tokens"] for r in records)
@@ -587,20 +518,9 @@ def main():
           f"{fmt_tokens(total)} tokens, ~{fmt_dollars(cost)} est. cost")
 
     apply_theme()
-    if "monthly" in wanted:
-        chart_monthly(records, args.out_dir)
-    if "daily" in wanted:
-        chart_daily(records, args.out_dir)
-    if "rolling" in wanted:
-        chart_rolling(records, args.out_dir)
-    if "projects" in wanted:
-        chart_projects(records, args.out_dir)
-    if "tokentype" in wanted:
-        chart_tokentype(records, args.out_dir)
-    if "context" in wanted:
-        chart_context(records, args.out_dir)
-    if "cost" in wanted:
-        chart_cost(records, args.out_dir)
+    for kind in kinds:
+        for period in ("monthly", "daily"):
+            CHART_KINDS[kind](records, args.out_dir, period)
 
 
 if __name__ == "__main__":
