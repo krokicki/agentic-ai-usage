@@ -146,8 +146,14 @@ def model_label(name):
 
 
 def parse_claude(claude_dir):
-    """Yield usage records from Claude Code logs (recursive; deduplicated)."""
-    seen = set()
+    """Yield usage records from Claude Code logs (recursive; deduplicated).
+
+    A streamed response logs the same (message.id, requestId) several times
+    with growing `output_tokens`; only the last emission holds the complete
+    usage. We therefore keep the record with the largest output per key rather
+    than the first one seen.
+    """
+    best = {}  # key -> (output_tokens, record)
     pattern = os.path.join(claude_dir, "**", "*.jsonl")
     for jf in glob.glob(pattern, recursive=True):
         for line in open(jf, errors="ignore"):
@@ -163,11 +169,6 @@ def parse_claude(claude_dir):
             ts = o.get("timestamp")
             if not u or not ts:
                 continue
-            mid, rid = msg.get("id"), o.get("requestId")
-            key = (mid, rid) if (mid and rid) else o.get("uuid")
-            if key in seen:
-                continue
-            seen.add(key)
             inp = u.get("input_tokens", 0)
             out = u.get("output_tokens", 0)
             cc = u.get("cache_creation_input_tokens", 0)
@@ -175,9 +176,13 @@ def parse_claude(claude_dir):
             tok = inp + out + cc + cr
             if tok <= 0:
                 continue
+            mid, rid = msg.get("id"), o.get("requestId")
+            key = (mid, rid) if (mid and rid) else o.get("uuid")
+            if key in best and out <= best[key][0]:
+                continue
             cwd = o.get("cwd")
             name = msg.get("model", "")
-            yield {
+            best[key] = (out, {
                 "date": ts[:10],
                 "project": os.path.basename(cwd) if cwd else "unknown",
                 "family": model_family(name),
@@ -186,7 +191,9 @@ def parse_claude(claude_dir):
                 "input": inp, "output": out,
                 "cache_create": cc, "cache_read": cr,
                 "reasoning": 0,  # Claude doesn't report reasoning separately
-            }
+            })
+    for _, rec in best.values():
+        yield rec
 
 
 def parse_codex(codex_dir):
