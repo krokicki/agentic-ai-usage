@@ -408,6 +408,37 @@ def chart_tokentype(records, out_dir):
     _save(fig, out_dir, "usage_tokens_by_type.png")
 
 
+def chart_context(records, out_dir):
+    """Avg cache-read tokens per request — a proxy for context size per turn.
+
+    Cache reads dominate any agentic session, so their *per-request* size is
+    the real signal of how much context each turn was replaying. Restricted to
+    Claude, whose caching is comparable across requests (Codex logs report
+    caching differently and would dilute the average).
+    """
+    cr = defaultdict(int)
+    n = defaultdict(int)
+    for r in records:
+        if r["family"] == "Codex":
+            continue
+        m = r["date"][:7]
+        cr[m] += r["cache_read"]
+        n[m] += 1
+    months = sorted(cr)
+    vals = np.array([cr[m] / n[m] for m in months])
+    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
+    ax.bar(months, vals, color=COMPONENT_COLORS["Cache read"], width=0.62)
+    for i, v in enumerate(vals):
+        ax.text(i, v, " " + fmt_tokens(v), ha="center", va="bottom",
+                fontsize=10, fontweight="bold", color="#e6edf3")
+    style_axis(ax)
+    ax.set_ylabel("Avg cache-read tokens / request")
+    ax.set_title("Context per Request — Monthly (avg cache reads / request, "
+                 "Claude only)", loc="left", pad=14)
+    ax.set_ylim(0, vals.max() * 1.12)
+    _save(fig, out_dir, "usage_context_per_request.png")
+
+
 def chart_daily(records, out_dir):
     order, colors = model_order_and_colors(records)
     agg = by_period_group(records, lambda d: d)
@@ -533,7 +564,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("charts", nargs="*",
                    choices=["monthly", "daily", "rolling", "projects",
-                            "tokentype", "cost", "all"],
+                            "tokentype", "context", "cost", "all"],
                    default=["all"],
                    help="which chart(s) to generate (default: all)")
     p.add_argument("--out-dir", default=os.path.join(here, "charts"),
@@ -546,7 +577,8 @@ def main():
 
     wanted = set(args.charts)
     if "all" in wanted:
-        wanted = {"monthly", "daily", "rolling", "projects", "tokentype", "cost"}
+        wanted = {"monthly", "daily", "rolling", "projects", "tokentype",
+                  "context", "cost"}
 
     records = collect_usage(args.claude_dir, args.codex_dir or "")
     total = sum(r["tokens"] for r in records)
@@ -565,6 +597,8 @@ def main():
         chart_projects(records, args.out_dir)
     if "tokentype" in wanted:
         chart_tokentype(records, args.out_dir)
+    if "context" in wanted:
+        chart_context(records, args.out_dir)
     if "cost" in wanted:
         chart_cost(records, args.out_dir)
 

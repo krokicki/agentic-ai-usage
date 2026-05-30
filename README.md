@@ -20,6 +20,7 @@ pixi run daily      # daily tokens, stacked by model
 pixi run rolling    # 3-day rolling average, line per model + total
 pixi run projects   # daily tokens, stacked by project (top 11 + "other")
 pixi run tokentype  # monthly tokens, stacked by token type
+pixi run context    # monthly avg cache reads per request, Claude (context proxy)
 pixi run cost       # monthly estimated cost (USD), stacked by token type
 ```
 
@@ -32,6 +33,7 @@ Charts are written to `./charts/*.png`.
 | `rolling`  | `usage_rolling3d.png` |
 | `projects` | `usage_daily_by_project.png` |
 | `tokentype`| `usage_tokens_by_type.png` |
+| `context`  | `usage_context_per_request.png` |
 | `cost`     | `usage_cost_monthly.png` |
 
 ### Options
