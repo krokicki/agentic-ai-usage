@@ -49,10 +49,17 @@ CACHE_READ_MULT = 0.10
 # Claude usage billed $961.90. Recompute if you recalibrate against a new bill.
 CLAUDE_CALIBRATION = 0.2222387723400814
 
-# Token-type breakdown used by the cost chart.
+# Token-type breakdown shared by the token-type and cost charts.
 COST_COMPONENTS = ["Input", "Output", "Cache write", "Cache read"]
 COMPONENT_COLORS = {"Input": "#6e8fd4", "Output": "#d97757",
                     "Cache write": "#e0b341", "Cache read": "#7ec699"}
+COMPONENT_FIELD = {"Input": "input", "Output": "output",
+                   "Cache write": "cache_create", "Cache read": "cache_read"}
+
+
+def token_components(r):
+    """Raw token counts of one usage record, split by token type."""
+    return {label: r[field] for label, field in COMPONENT_FIELD.items()}
 
 
 def cost_components(r):
@@ -299,6 +306,16 @@ def cost_by_period_component(records, key):
     return agg
 
 
+def tokens_by_period_component(records, key):
+    """period -> {token-type: tokens}. key(date) selects month or day."""
+    agg = defaultdict(lambda: defaultdict(int))
+    for r in records:
+        bucket = agg[key(r["date"])]
+        for comp, n in token_components(r).items():
+            bucket[comp] += n
+    return agg
+
+
 def by_date_project(records):
     agg = defaultdict(lambda: defaultdict(int))
     proj_total = defaultdict(int)
@@ -364,6 +381,31 @@ def chart_cost(records, out_dir):
                  loc="left", pad=14)
     ax.set_ylim(0, bottom.max() * 1.12)
     _save(fig, out_dir, "usage_cost_monthly.png")
+
+
+def chart_tokentype(records, out_dir):
+    agg = tokens_by_period_component(records, lambda d: d[:7])
+    months = sorted(agg)
+    fig, ax = plt.subplots(figsize=(10, 5.6), dpi=160)
+    bottom = np.zeros(len(months))
+    used = []
+    for comp in COST_COMPONENTS:
+        vals = np.array([agg[m].get(comp, 0) for m in months])
+        if vals.sum() == 0:
+            continue
+        ax.bar(months, vals, bottom=bottom, color=COMPONENT_COLORS[comp],
+               width=0.62, label=comp)
+        bottom += vals
+        used.append(comp)
+    for i, t in enumerate(bottom):
+        ax.text(i, t, " " + fmt_tokens(t), ha="center", va="bottom",
+                fontsize=10, fontweight="bold", color="#e6edf3")
+    style_axis(ax)
+    _legend(ax, used, COMPONENT_COLORS)
+    ax.set_title("AI Token Usage — Monthly (stacked by token type)",
+                 loc="left", pad=14)
+    ax.set_ylim(0, bottom.max() * 1.12)
+    _save(fig, out_dir, "usage_tokens_by_type.png")
 
 
 def chart_daily(records, out_dir):
@@ -491,7 +533,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("charts", nargs="*",
                    choices=["monthly", "daily", "rolling", "projects",
-                            "cost", "all"],
+                            "tokentype", "cost", "all"],
                    default=["all"],
                    help="which chart(s) to generate (default: all)")
     p.add_argument("--out-dir", default=os.path.join(here, "charts"),
@@ -504,7 +546,7 @@ def main():
 
     wanted = set(args.charts)
     if "all" in wanted:
-        wanted = {"monthly", "daily", "rolling", "projects", "cost"}
+        wanted = {"monthly", "daily", "rolling", "projects", "tokentype", "cost"}
 
     records = collect_usage(args.claude_dir, args.codex_dir or "")
     total = sum(r["tokens"] for r in records)
@@ -521,6 +563,8 @@ def main():
         chart_rolling(records, args.out_dir)
     if "projects" in wanted:
         chart_projects(records, args.out_dir)
+    if "tokentype" in wanted:
+        chart_tokentype(records, args.out_dir)
     if "cost" in wanted:
         chart_cost(records, args.out_dir)
 
