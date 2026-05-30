@@ -110,6 +110,14 @@ def fmt_count(x, _=None):
     return f"{x:,.0f}"
 
 
+def fmt_ratio(x, _=None):
+    return f"{x:.1f}"
+
+
+def fmt_pct(x, _=None):
+    return f"{x:.0%}"
+
+
 # ----------------------------------------------------------------------------
 # log parsing  ->  flat list of usage records {date, project, family, tokens}
 # ----------------------------------------------------------------------------
@@ -177,6 +185,7 @@ def parse_claude(claude_dir):
                 "tokens": tok,
                 "input": inp, "output": out,
                 "cache_create": cc, "cache_read": cr,
+                "reasoning": 0,  # Claude doesn't report reasoning separately
             }
 
 
@@ -222,6 +231,7 @@ def parse_codex(codex_dir):
                 "output": last.get("output_tokens", 0),
                 "cache_create": 0,
                 "cache_read": cached,
+                "reasoning": last.get("reasoning_output_tokens", 0),
             }
 
 
@@ -311,6 +321,65 @@ def collect_prompts(claude_dir, codex_dir):
     if codex_dir and os.path.isdir(codex_dir):
         prompts.extend(parse_codex_prompts(codex_dir))
     return prompts
+
+
+def parse_claude_interruptions(claude_dir):
+    """Yield {date, project} for each '[Request interrupted by user]' message."""
+    pattern = os.path.join(claude_dir, "**", "*.jsonl")
+    for jf in glob.glob(pattern, recursive=True):
+        for line in open(jf, errors="ignore"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get("type") != "user" or o.get("isMeta"):
+                continue
+            content = (o.get("message") or {}).get("content")
+            ts = o.get("timestamp")
+            if not isinstance(content, list) or not ts:
+                continue
+            if any(isinstance(b, dict) and b.get("type") == "text"
+                   and str(b.get("text", "")).startswith("[Request interrupted")
+                   for b in content):
+                cwd = o.get("cwd")
+                yield {"date": ts[:10],
+                       "project": os.path.basename(cwd) if cwd else "unknown"}
+
+
+def parse_codex_interruptions(codex_dir):
+    """Yield {date, project} for each Codex turn_aborted event."""
+    pattern = os.path.join(codex_dir, "**", "rollout-*.jsonl")
+    for jf in glob.glob(pattern, recursive=True):
+        cwd = None
+        for line in open(jf, errors="ignore"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            payload = o.get("payload") or {}
+            if o.get("type") == "session_meta":
+                cwd = payload.get("cwd")
+                continue
+            ts = o.get("timestamp")
+            if payload.get("type") != "turn_aborted" or not ts:
+                continue
+            yield {"date": ts[:10],
+                   "project": os.path.basename(cwd) if cwd else "unknown"}
+
+
+def collect_interruptions(claude_dir, codex_dir):
+    rows = []
+    if os.path.isdir(claude_dir):
+        rows.extend(parse_claude_interruptions(claude_dir))
+    if codex_dir and os.path.isdir(codex_dir):
+        rows.extend(parse_codex_interruptions(codex_dir))
+    return rows
 
 
 # ----------------------------------------------------------------------------
@@ -408,10 +477,33 @@ def _value_axis(ax, fmt, ylabel):
     ax.set_ylabel(ylabel)
 
 
+def _bar_over_time(keys, vals, period, *, out_dir, fname, title, fmt, ylabel,
+                   color=PALETTE[1]):
+    """Render and save a single-series bar chart over time."""
+    if not keys:
+        return
+    x, width = _bar_x(keys, period)
+    fig, ax = plt.subplots(figsize=(10, 5.6) if period == "monthly"
+                           else (13, 5.6), dpi=160)
+    ax.bar(x, vals, color=color, width=width)
+    if period == "monthly":
+        for i, v in enumerate(vals):
+            ax.text(i, v, " " + fmt(v), ha="center", va="bottom",
+                    fontsize=10, fontweight="bold", color="#e6edf3")
+        ax.set_ylim(0, (max(vals) or 1) * 1.12)
+    else:
+        _date_axis(ax, x)
+    _value_axis(ax, fmt, ylabel)
+    ax.set_title(title, loc="left", pad=14)
+    _save(fig, out_dir, fname)
+
+
 def _draw_stacked(agg, order, colors, period, *, out_dir, fname, title,
                   fmt=fmt_tokens, ylabel="Tokens", labels=None, ncol=1):
     """Render and save one stacked-bar chart for the given period."""
     keys = sorted(agg)
+    if not keys:
+        return
     x, width = _bar_x(keys, period)
     fig, ax = plt.subplots(figsize=(10, 5.6) if period == "monthly"
                            else (13, 5.6), dpi=160)
@@ -488,23 +580,13 @@ def chart_context(records, out_dir, period):
         cr[k] += r["cache_read"]
         n[k] += 1
     keys = sorted(cr)
-    vals = np.array([cr[k] / n[k] for k in keys])
-    x, width = _bar_x(keys, period)
-    fig, ax = plt.subplots(figsize=(10, 5.6) if period == "monthly"
-                           else (13, 5.6), dpi=160)
-    ax.bar(x, vals, color=COMPONENT_COLORS["Cache read"], width=width)
-    if period == "monthly":
-        for i, v in enumerate(vals):
-            ax.text(i, v, " " + fmt_tokens(v), ha="center", va="bottom",
-                    fontsize=10, fontweight="bold", color="#e6edf3")
-        ax.set_ylim(0, (vals.max() or 1) * 1.12)
-    else:
-        _date_axis(ax, x)
-    _value_axis(ax, fmt_tokens, "Avg cache-read tokens / request")
-    ax.set_title(f"Context per Request — {period.title()} "
-                 f"(avg cache reads / request, Claude only)",
-                 loc="left", pad=14)
-    _save(fig, out_dir, f"usage_context_{period}.png")
+    vals = [cr[k] / n[k] for k in keys]
+    _bar_over_time(keys, vals, period, out_dir=out_dir,
+                   fname=f"usage_context_{period}.png", fmt=fmt_tokens,
+                   ylabel="Avg cache-read tokens / request",
+                   color=COMPONENT_COLORS["Cache read"],
+                   title=f"Context per Request — {period.title()} "
+                         f"(avg cache reads / request, Claude only)")
 
 
 def _by_project_chart(records, out_dir, period, *, kind, value, title,
@@ -551,6 +633,130 @@ def chart_prompts(records, out_dir, period):
                             f"(stacked by project)")
 
 
+def chart_interruptions(records, out_dir, period):
+    _by_project_chart(records, out_dir, period, kind="interruptions",
+                      value=lambda r: 1, fmt=fmt_count, ylabel="Interruptions",
+                      title=f"Interruptions — {period.title()} "
+                            f"(stacked by project)")
+
+
+def chart_turns(data, out_dir, period):
+    """Model turns per prompt over time — a measure of agentic leverage."""
+    keyfn = _keyfn(period)
+    turns = defaultdict(int)
+    proms = defaultdict(int)
+    for r in data["usage"]:
+        turns[keyfn(r["date"])] += 1
+    for r in data["prompts"]:
+        proms[keyfn(r["date"])] += 1
+    keys = [k for k in sorted(set(turns) | set(proms)) if proms.get(k)]
+    vals = [turns[k] / proms[k] for k in keys]
+    _bar_over_time(keys, vals, period, out_dir=out_dir,
+                   fname=f"usage_turns_{period}.png", fmt=fmt_ratio,
+                   ylabel="Model turns / prompt", color=PALETTE[4],
+                   title=f"Agentic Leverage — {period.title()} "
+                         f"(model turns per prompt)")
+
+
+def chart_cachehit(data, out_dir, period):
+    """Share of input-side tokens served from cache, over time."""
+    keyfn = _keyfn(period)
+    hit = defaultdict(int)
+    tot = defaultdict(int)
+    for r in data["usage"]:
+        k = keyfn(r["date"])
+        hit[k] += r["cache_read"]
+        tot[k] += r["input"] + r["cache_create"] + r["cache_read"]
+    keys = [k for k in sorted(tot) if tot[k]]
+    vals = [hit[k] / tot[k] for k in keys]
+    _bar_over_time(keys, vals, period, out_dir=out_dir,
+                   fname=f"usage_cachehit_{period}.png", fmt=fmt_pct,
+                   ylabel="Cache hit ratio", color=COMPONENT_COLORS["Cache read"],
+                   title=f"Cache Hit Ratio — {period.title()} "
+                         f"(cache reads / input-side tokens)")
+
+
+def chart_reasoning(data, out_dir, period):
+    """Codex reasoning vs visible output tokens over time (Codex only)."""
+    keyfn = _keyfn(period)
+    agg = defaultdict(lambda: defaultdict(int))
+    for r in data["usage"]:
+        if r["family"] != "Codex":
+            continue
+        k = keyfn(r["date"])
+        agg[k]["Reasoning"] += r["reasoning"]
+        agg[k]["Output (visible)"] += max(r["output"] - r["reasoning"], 0)
+    colors = {"Reasoning": "#b083d9", "Output (visible)": "#d97757"}
+    _draw_stacked(agg, ["Reasoning", "Output (visible)"], colors, period,
+                  out_dir=out_dir, fname=f"usage_reasoning_{period}.png",
+                  title=f"Codex Output Tokens — {period.title()} "
+                        f"(reasoning vs visible)")
+
+
+def chart_tokens_per_prompt(data, out_dir, _period=None, top_n=11):
+    """Avg tokens per prompt for the top projects (single all-time ranking)."""
+    tok = defaultdict(int)
+    pr = defaultdict(int)
+    for r in data["usage"]:
+        tok[r["project"]] += r["tokens"]
+    for r in data["prompts"]:
+        pr[r["project"]] += 1
+    ranked = [p for p in sorted(tok, key=lambda p: -tok[p]) if pr.get(p)][:top_n]
+    pairs = sorted(((p, tok[p] / pr[p]) for p in ranked), key=lambda x: x[1])
+    if not pairs:
+        return
+    names = [p for p, _ in pairs]
+    vals = [v for _, v in pairs]
+    fig, ax = plt.subplots(figsize=(11, 0.5 * len(names) + 1.8), dpi=160)
+    ax.barh(names, vals,
+            color=[PALETTE[i % len(PALETTE)] for i in range(len(names))])
+    for i, v in enumerate(vals):
+        ax.text(v, i, " " + fmt_tokens(v), va="center", ha="left",
+                fontsize=10, fontweight="bold", color="#e6edf3")
+    ax.grid(axis="x", color="#30363d", linewidth=0.7, alpha=0.6)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_tokens))
+    ax.set_xlabel("Tokens / prompt")
+    ax.set_xlim(0, max(vals) * 1.15)
+    ax.set_title(f"Tokens per Prompt — by project (top {top_n} by total tokens)",
+                 loc="left", pad=14)
+    _save(fig, out_dir, "usage_tokensperprompt.png")
+
+
+def chart_gantt(data, out_dir, _period=None, top_n=20):
+    """Project activity timeline: first→last day of usage per project."""
+    first, last, tok = {}, {}, defaultdict(int)
+    for r in data["usage"]:
+        p, d = r["project"], r["date"]
+        first[p] = min(first.get(p, d), d)
+        last[p] = max(last.get(p, d), d)
+        tok[p] += r["tokens"]
+    projs = sorted(tok, key=lambda p: -tok[p])[:top_n]
+    projs.sort(key=lambda p: first[p], reverse=True)  # earliest at top
+    if not projs:
+        return
+    fig, ax = plt.subplots(figsize=(12, 0.42 * len(projs) + 1.6), dpi=160)
+    for i, p in enumerate(projs):
+        x0 = mdates.date2num(datetime.strptime(first[p], "%Y-%m-%d"))
+        x1 = mdates.date2num(datetime.strptime(last[p], "%Y-%m-%d"))
+        ax.barh(i, x1 - x0 + 1, left=x0, height=0.6,
+                color=PALETTE[i % len(PALETTE)])
+    ax.set_yticks(range(len(projs)))
+    ax.set_yticklabels(projs, fontsize=9)
+    ax.set_ylim(-0.6, len(projs) - 0.4)
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.grid(axis="x", color="#30363d", linewidth=0.7, alpha=0.6)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.set_title(f"Project Timeline (top {top_n} by tokens)", loc="left", pad=14)
+    _save(fig, out_dir, "usage_gantt.png")
+
+
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------
@@ -572,17 +778,33 @@ def _save(fig, out_dir, name):
 
 
 # ----------------------------------------------------------------------------
-# kind -> (chart fn, data source: "usage" records or "prompts" records)
+# kind -> spec. fn(data, out_dir, period); `periodic` kinds render monthly +
+# daily, others render once (period=None); `needs` lists extra datasets to load.
 CHART_KINDS = {
-    "models":     (lambda r, o, p: chart_models(r, o, p), "usage"),
-    "tokentype":  (lambda r, o, p: chart_tokentype(r, o, p), "usage"),
-    "worktokens": (lambda r, o, p: chart_tokentype(r, o, p,
-                                                    exclude_cache_read=True),
-                   "usage"),
-    "context":    (lambda r, o, p: chart_context(r, o, p), "usage"),
-    "cost":       (lambda r, o, p: chart_cost(r, o, p), "usage"),
-    "projects":   (lambda r, o, p: chart_projects(r, o, p), "usage"),
-    "prompts":    (lambda r, o, p: chart_prompts(r, o, p), "prompts"),
+    "models":      dict(fn=lambda d, o, p: chart_models(d["usage"], o, p),
+                        periodic=True, needs=()),
+    "tokentype":   dict(fn=lambda d, o, p: chart_tokentype(d["usage"], o, p),
+                        periodic=True, needs=()),
+    "worktokens":  dict(fn=lambda d, o, p: chart_tokentype(
+                        d["usage"], o, p, exclude_cache_read=True),
+                        periodic=True, needs=()),
+    "context":     dict(fn=lambda d, o, p: chart_context(d["usage"], o, p),
+                        periodic=True, needs=()),
+    "cachehit":    dict(fn=chart_cachehit, periodic=True, needs=()),
+    "cost":        dict(fn=lambda d, o, p: chart_cost(d["usage"], o, p),
+                        periodic=True, needs=()),
+    "reasoning":   dict(fn=chart_reasoning, periodic=True, needs=()),
+    "projects":    dict(fn=lambda d, o, p: chart_projects(d["usage"], o, p),
+                        periodic=True, needs=()),
+    "prompts":     dict(fn=lambda d, o, p: chart_prompts(d["prompts"], o, p),
+                        periodic=True, needs=("prompts",)),
+    "interruptions": dict(fn=lambda d, o, p: chart_interruptions(
+                          d["interruptions"], o, p),
+                          periodic=True, needs=("interruptions",)),
+    "turns":       dict(fn=chart_turns, periodic=True, needs=("prompts",)),
+    "tokensperprompt": dict(fn=chart_tokens_per_prompt, periodic=False,
+                            needs=("prompts",)),
+    "gantt":       dict(fn=chart_gantt, periodic=False, needs=()),
 }
 
 
@@ -593,8 +815,8 @@ def main():
     p.add_argument("charts", nargs="*",
                    choices=list(CHART_KINDS) + ["all"],
                    default=["all"],
-                   help="chart kind(s) to generate (default: all); each kind "
-                        "produces a monthly and a daily PNG")
+                   help="chart kind(s) to generate (default: all); periodic "
+                        "kinds produce a monthly and a daily PNG")
     p.add_argument("--out-dir", default=os.path.join(here, "charts"),
                    help="output directory for PNGs (default: ./charts)")
     p.add_argument("--claude-dir", default=os.path.expanduser("~/.claude/projects"),
@@ -613,16 +835,22 @@ def main():
     print(f"parsed {len(records):,} usage records, "
           f"{fmt_tokens(total)} tokens, ~{fmt_dollars(cost)} est. cost")
 
+    needs = set().union(*(CHART_KINDS[k]["needs"] for k in kinds)) if kinds \
+        else set()
     data = {"usage": records}
-    if any(CHART_KINDS[k][1] == "prompts" for k in kinds):
+    if "prompts" in needs:
         data["prompts"] = collect_prompts(args.claude_dir, args.codex_dir or "")
         print(f"parsed {len(data['prompts']):,} prompts")
+    if "interruptions" in needs:
+        data["interruptions"] = collect_interruptions(args.claude_dir,
+                                                       args.codex_dir or "")
+        print(f"parsed {len(data['interruptions']):,} interruptions")
 
     apply_theme()
     for kind in kinds:
-        fn, src = CHART_KINDS[kind]
-        for period in ("monthly", "daily"):
-            fn(data[src], args.out_dir, period)
+        spec = CHART_KINDS[kind]
+        for period in (("monthly", "daily") if spec["periodic"] else (None,)):
+            spec["fn"](data, args.out_dir, period)
 
 
 if __name__ == "__main__":
