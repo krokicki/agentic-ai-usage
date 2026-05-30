@@ -25,7 +25,7 @@ pixi run cost           # estimated cost (USD), stacked by token type
 pixi run reasoning      # Codex reasoning vs visible output tokens
 pixi run projects       # tokens, stacked by project (top 11 + "other")
 pixi run prompts        # count of input prompts, stacked by project
-pixi run interruptions  # count of user interrupts, stacked by project
+pixi run interruptions  # interrupts per prompt (steering-friction rate)
 pixi run turns          # model turns per prompt (agentic leverage)
 pixi run tokensperprompt  # avg tokens per prompt, by project (single chart)
 pixi run gantt          # project activity timeline (single chart)
@@ -81,8 +81,9 @@ pixi run python analyze.py all --claude-dir ~/.claude/projects --codex-dir ''
   commands count as prompts; older Claude logs without `promptId` fall back to
   per-message counting.
 - `turns` is *agentic leverage*: model turns (API responses) ÷ prompts — how
-  much autonomous work each instruction triggers. `interruptions` counts
-  `[Request interrupted by user]` messages plus Codex `turn_aborted` events.
+  much autonomous work each instruction triggers. `interruptions` is a *rate*
+  — `[Request interrupted by user]` messages plus Codex `turn_aborted` events,
+  divided by prompts — so it reflects steering friction, not raw volume.
   `reasoning` shows Codex `reasoning_output_tokens` vs visible output (Codex
   only; Claude doesn't report reasoning separately).
 

@@ -633,11 +633,26 @@ def chart_prompts(records, out_dir, period):
                             f"(stacked by project)")
 
 
-def chart_interruptions(records, out_dir, period):
-    _by_project_chart(records, out_dir, period, kind="interruptions",
-                      value=lambda r: 1, fmt=fmt_count, ylabel="Interruptions",
-                      title=f"Interruptions — {period.title()} "
-                            f"(stacked by project)")
+def chart_interruptions(data, out_dir, period):
+    """Interruptions per prompt over time — steering friction, volume-normalized.
+
+    A raw count just tracks usage; dividing by prompts shows how often a typical
+    instruction had to be course-corrected.
+    """
+    keyfn = _keyfn(period)
+    ints = defaultdict(int)
+    proms = defaultdict(int)
+    for r in data["interruptions"]:
+        ints[keyfn(r["date"])] += 1
+    for r in data["prompts"]:
+        proms[keyfn(r["date"])] += 1
+    keys = [k for k in sorted(proms) if proms[k]]
+    vals = [ints[k] / proms[k] for k in keys]
+    _bar_over_time(keys, vals, period, out_dir=out_dir,
+                   fname=f"usage_interruptions_{period}.png", fmt=fmt_pct,
+                   ylabel="Interruptions / prompt", color="#e0739b",
+                   title=f"Interruption Rate — {period.title()} "
+                         f"(interrupts per prompt)")
 
 
 def chart_turns(data, out_dir, period):
@@ -798,9 +813,8 @@ CHART_KINDS = {
                         periodic=True, needs=()),
     "prompts":     dict(fn=lambda d, o, p: chart_prompts(d["prompts"], o, p),
                         periodic=True, needs=("prompts",)),
-    "interruptions": dict(fn=lambda d, o, p: chart_interruptions(
-                          d["interruptions"], o, p),
-                          periodic=True, needs=("interruptions",)),
+    "interruptions": dict(fn=chart_interruptions, periodic=True,
+                          needs=("prompts", "interruptions")),
     "turns":       dict(fn=chart_turns, periodic=True, needs=("prompts",)),
     "tokensperprompt": dict(fn=chart_tokens_per_prompt, periodic=False,
                             needs=("prompts",)),
