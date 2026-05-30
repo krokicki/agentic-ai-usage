@@ -106,6 +106,10 @@ def fmt_dollars(x, _=None):
     return f"${x:.0f}"
 
 
+def fmt_count(x, _=None):
+    return f"{x:,.0f}"
+
+
 # ----------------------------------------------------------------------------
 # log parsing  ->  flat list of usage records {date, project, family, tokens}
 # ----------------------------------------------------------------------------
@@ -234,6 +238,79 @@ def collect_usage(claude_dir, codex_dir):
     if not records:
         sys.exit("No usage logs found.")
     return records
+
+
+# ----------------------------------------------------------------------------
+# prompt parsing  ->  one {date, project} per user prompt
+# ----------------------------------------------------------------------------
+def parse_claude_prompts(claude_dir):
+    """Yield {date, project} for each user prompt.
+
+    Counts non-meta user messages, skipping tool results (which are logged as
+    user messages too). Deduplicates by promptId — one prompt fans out into
+    several records — falling back to uuid for older logs that predate it.
+    """
+    seen = set()
+    pattern = os.path.join(claude_dir, "**", "*.jsonl")
+    for jf in glob.glob(pattern, recursive=True):
+        for line in open(jf, errors="ignore"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get("type") != "user" or o.get("isMeta"):
+                continue
+            content = (o.get("message") or {}).get("content")
+            if isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content):
+                continue
+            ts = o.get("timestamp")
+            if not ts:
+                continue
+            key = o.get("promptId") or o.get("uuid")
+            if key in seen:
+                continue
+            seen.add(key)
+            cwd = o.get("cwd")
+            yield {"date": ts[:10],
+                   "project": os.path.basename(cwd) if cwd else "unknown"}
+
+
+def parse_codex_prompts(codex_dir):
+    """Yield {date, project} for each Codex user_message event."""
+    pattern = os.path.join(codex_dir, "**", "rollout-*.jsonl")
+    for jf in glob.glob(pattern, recursive=True):
+        cwd = None
+        for line in open(jf, errors="ignore"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            payload = o.get("payload") or {}
+            if o.get("type") == "session_meta":
+                cwd = payload.get("cwd")
+                continue
+            ts = o.get("timestamp")
+            if payload.get("type") != "user_message" or not ts:
+                continue
+            yield {"date": ts[:10],
+                   "project": os.path.basename(cwd) if cwd else "unknown"}
+
+
+def collect_prompts(claude_dir, codex_dir):
+    prompts = []
+    if os.path.isdir(claude_dir):
+        prompts.extend(parse_claude_prompts(claude_dir))
+    if codex_dir and os.path.isdir(codex_dir):
+        prompts.extend(parse_codex_prompts(codex_dir))
+    return prompts
 
 
 # ----------------------------------------------------------------------------
@@ -430,20 +507,23 @@ def chart_context(records, out_dir, period):
     _save(fig, out_dir, f"usage_context_{period}.png")
 
 
-def chart_projects(records, out_dir, period, top_n=11):
+def _by_project_chart(records, out_dir, period, *, kind, value, title,
+                      fmt=fmt_tokens, ylabel="Tokens", top_n=11):
+    """Stacked-by-project chart; `value(r)` is the per-record quantity summed."""
     keyfn = _keyfn(period)
-    agg = defaultdict(lambda: defaultdict(int))
-    proj_total = defaultdict(int)
+    agg = defaultdict(lambda: defaultdict(float))
+    proj_total = defaultdict(float)
     for r in records:
-        agg[keyfn(r["date"])][r["project"]] += r["tokens"]
-        proj_total[r["project"]] += r["tokens"]
+        v = value(r)
+        agg[keyfn(r["date"])][r["project"]] += v
+        proj_total[r["project"]] += v
     ranked = sorted(proj_total.items(), key=lambda x: -x[1])
     top = {p for p, _ in ranked[:top_n]}
     has_other = len(ranked) > top_n
-    collapsed = defaultdict(lambda: defaultdict(int))
+    collapsed = defaultdict(lambda: defaultdict(float))
     for k, projs in agg.items():
-        for proj, tok in projs.items():
-            collapsed[k][proj if proj in top else "other"] += tok
+        for proj, v in projs.items():
+            collapsed[k][proj if proj in top else "other"] += v
     order = [p for p, _ in ranked[:top_n]] + (["other"] if has_other else [])
     colors = {p: PALETTE[i % len(PALETTE)] for i, p in enumerate(order)}
     labels = {}
@@ -451,11 +531,24 @@ def chart_projects(records, out_dir, period, top_n=11):
         colors["other"] = "#5a6473"
         labels["other"] = f"other ({len(ranked) - top_n} projects)"
     _draw_stacked(collapsed, order, colors, period, out_dir=out_dir,
-                  fname=f"usage_projects_{period}.png",
-                  title=f"AI Token Usage — {period.title()} "
-                        f"(stacked by project)", labels=labels, ncol=2)
+                  fname=f"usage_{kind}_{period}.png", title=title,
+                  fmt=fmt, ylabel=ylabel, labels=labels, ncol=2)
     if period == "monthly":
         print(f"  {len(ranked)} projects total; top {top_n} shown")
+
+
+def chart_projects(records, out_dir, period):
+    _by_project_chart(records, out_dir, period, kind="projects",
+                      value=lambda r: r["tokens"],
+                      title=f"AI Token Usage — {period.title()} "
+                            f"(stacked by project)")
+
+
+def chart_prompts(records, out_dir, period):
+    _by_project_chart(records, out_dir, period, kind="prompts",
+                      value=lambda r: 1, fmt=fmt_count, ylabel="Prompts",
+                      title=f"Input Prompts — {period.title()} "
+                            f"(stacked by project)")
 
 
 # ----------------------------------------------------------------------------
@@ -479,14 +572,17 @@ def _save(fig, out_dir, name):
 
 
 # ----------------------------------------------------------------------------
+# kind -> (chart fn, data source: "usage" records or "prompts" records)
 CHART_KINDS = {
-    "models":     lambda r, o, p: chart_models(r, o, p),
-    "tokentype":  lambda r, o, p: chart_tokentype(r, o, p),
-    "worktokens": lambda r, o, p: chart_tokentype(r, o, p,
-                                                   exclude_cache_read=True),
-    "context":    lambda r, o, p: chart_context(r, o, p),
-    "cost":       lambda r, o, p: chart_cost(r, o, p),
-    "projects":   lambda r, o, p: chart_projects(r, o, p),
+    "models":     (lambda r, o, p: chart_models(r, o, p), "usage"),
+    "tokentype":  (lambda r, o, p: chart_tokentype(r, o, p), "usage"),
+    "worktokens": (lambda r, o, p: chart_tokentype(r, o, p,
+                                                    exclude_cache_read=True),
+                   "usage"),
+    "context":    (lambda r, o, p: chart_context(r, o, p), "usage"),
+    "cost":       (lambda r, o, p: chart_cost(r, o, p), "usage"),
+    "projects":   (lambda r, o, p: chart_projects(r, o, p), "usage"),
+    "prompts":    (lambda r, o, p: chart_prompts(r, o, p), "prompts"),
 }
 
 
@@ -517,10 +613,16 @@ def main():
     print(f"parsed {len(records):,} usage records, "
           f"{fmt_tokens(total)} tokens, ~{fmt_dollars(cost)} est. cost")
 
+    data = {"usage": records}
+    if any(CHART_KINDS[k][1] == "prompts" for k in kinds):
+        data["prompts"] = collect_prompts(args.claude_dir, args.codex_dir or "")
+        print(f"parsed {len(data['prompts']):,} prompts")
+
     apply_theme()
     for kind in kinds:
+        fn, src = CHART_KINDS[kind]
         for period in ("monthly", "daily"):
-            CHART_KINDS[kind](records, args.out_dir, period)
+            fn(data[src], args.out_dir, period)
 
 
 if __name__ == "__main__":

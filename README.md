@@ -22,6 +22,7 @@ pixi run worktokens # tokens, stacked by token type, excluding cache reads
 pixi run context    # avg cache reads per request, Claude (context-size proxy)
 pixi run cost       # estimated cost (USD), stacked by token type
 pixi run projects   # tokens, stacked by project (top 11 + "other")
+pixi run prompts    # count of input prompts, stacked by project
 ```
 
 Each kind writes `usage_<kind>_monthly.png` and `usage_<kind>_daily.png` to
@@ -35,6 +36,7 @@ Each kind writes `usage_<kind>_monthly.png` and `usage_<kind>_daily.png` to
 | `context`    | `usage_context_{monthly,daily}.png` |
 | `cost`       | `usage_cost_{monthly,daily}.png` |
 | `projects`   | `usage_projects_{monthly,daily}.png` |
+| `prompts`    | `usage_prompts_{monthly,daily}.png` |
 
 ### Options
 
@@ -60,6 +62,11 @@ pixi run python analyze.py all --claude-dir ~/.claude/projects --codex-dir ''
   single "Codex"; pricing is still applied per family.
 - Codex usage is summed from per-turn `last_token_usage` deltas to avoid
   double-counting the cumulative `total_token_usage`.
+- The `prompts` chart counts the messages you actually typed: non-meta user
+  messages (excluding tool results), deduplicated by `promptId` so one prompt
+  isn't counted per fan-out turn, plus Codex `user_message` events. Slash
+  commands count as prompts; older Claude logs without `promptId` fall back to
+  per-message counting.
 
 ### Cost estimation
 
