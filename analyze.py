@@ -199,13 +199,18 @@ def parse_claude(claude_dir):
 def parse_codex(codex_dir):
     """Yield usage records from Codex session rollouts.
 
-    Token usage lives in `token_count` events; `last_token_usage` is the
-    per-turn delta, so summing it across a session avoids double-counting the
-    cumulative `total_token_usage`.
+    Token usage lives in `token_count` events. We can't sum `last_token_usage`:
+    some events repeat it while the cumulative `total_token_usage` is unchanged,
+    which double-counts. Instead we take the positive per-session delta of the
+    cumulative `total_token_usage` (treating a decrease as a context reset that
+    re-accumulates from zero), which counts each token exactly once.
     """
+    fields = ("input_tokens", "cached_input_tokens", "output_tokens",
+              "reasoning_output_tokens", "total_tokens")
     pattern = os.path.join(codex_dir, "**", "rollout-*.jsonl")
     for jf in glob.glob(pattern, recursive=True):
         cwd = None
+        prev = None  # last cumulative total_token_usage seen this session
         for line in open(jf, errors="ignore"):
             line = line.strip()
             if not line:
@@ -220,25 +225,37 @@ def parse_codex(codex_dir):
                 continue
             if payload.get("type") != "token_count":
                 continue
-            last = (payload.get("info") or {}).get("last_token_usage") or {}
-            tok = last.get("total_tokens", 0)
+            total = (payload.get("info") or {}).get("total_token_usage") or {}
             ts = o.get("timestamp")
-            if tok <= 0 or not ts:
+            if not total or not ts:
+                continue
+            cur = total.get("total_tokens", 0)
+            base = prev.get("total_tokens", 0) if prev else 0
+            if prev is not None and cur == base:
+                continue  # repeated cumulative — no new usage
+            if cur < base:  # context reset: re-accumulates from zero
+                delta = dict(total)
+            else:
+                delta = {f: total.get(f, 0) - prev.get(f, 0) for f in fields} \
+                    if prev else dict(total)
+            prev = total
+            tok = delta.get("total_tokens", 0)
+            if tok <= 0:
                 continue
             # `input_tokens` includes the cached portion; split it out so the
             # cached part can be priced at the cheaper cache-read rate.
-            cached = last.get("cached_input_tokens", 0)
+            cached = delta.get("cached_input_tokens", 0)
             yield {
                 "date": ts[:10],
                 "project": os.path.basename(cwd) if cwd else "unknown",
                 "family": "Codex",
                 "model": "Codex",  # Codex logs carry no model id
                 "tokens": tok,
-                "input": max(last.get("input_tokens", 0) - cached, 0),
-                "output": last.get("output_tokens", 0),
+                "input": max(delta.get("input_tokens", 0) - cached, 0),
+                "output": delta.get("output_tokens", 0),
                 "cache_create": 0,
                 "cache_read": cached,
-                "reasoning": last.get("reasoning_output_tokens", 0),
+                "reasoning": delta.get("reasoning_output_tokens", 0),
             }
 
 
