@@ -1,0 +1,6 @@
+.pixi/
+charts/
+*.png
+pixi.lock
+__pycache__/
+.DS_Store
