@@ -33,21 +33,22 @@ PALETTE = ["#d97757", "#6e8fd4", "#7ec699", "#b083d9", "#e0b341", "#5fb9c4",
            "#e0739b", "#8c9eff", "#9ccc65", "#ff8a65", "#4db6ac", "#7e8a99"]
 
 # Per-family list price, USD per million tokens: (input, output).
-# Cache write is billed at 1.25x input and cache read at 0.10x input across
-# Anthropic models. Codex is set to zero because we don't pay for it directly.
+# Cache reads bill at 0.10x input; cache writes bill at 1.25x (5-minute TTL)
+# or 2.0x (1-hour TTL) — see CACHE_*_MULT. Codex is zero (not billed directly).
 PRICES = {
     "Opus":   (15.0, 75.0),
     "Sonnet": (3.0,  15.0),
     "Haiku":  (1.0,   5.0),
     "Codex":  (0.0,   0.0),
 }
-CACHE_WRITE_MULT = 1.25
+CACHE_WRITE_5M_MULT = 1.25   # 5-minute cache write
+CACHE_WRITE_1H_MULT = 2.00   # 1-hour cache write
 CACHE_READ_MULT = 0.10
 
 # List prices above overestimate our actual billing (subscription / discounted
 # rates). This factor scales Claude costs to match a known invoice: May 2026
-# Claude usage billed $961.90. Recompute if you recalibrate against a new bill.
-CLAUDE_CALIBRATION = 0.2222387723400814
+# Claude usage billed $984.43. Recompute if you recalibrate against a new bill.
+CLAUDE_CALIBRATION = 0.2057394643257366
 
 # Token-type breakdown shared by the token-type and cost charts.
 COST_COMPONENTS = ["Input", "Output", "Cache write", "Cache read"]
@@ -70,7 +71,9 @@ def cost_components(r):
     return {
         "Input": r["input"] * pin / 1e6,
         "Output": r["output"] * pout / 1e6,
-        "Cache write": r["cache_create"] * pin * CACHE_WRITE_MULT / 1e6,
+        "Cache write": (r["cache_create_5m"] * CACHE_WRITE_5M_MULT
+                        + r["cache_create_1h"] * CACHE_WRITE_1H_MULT)
+        * pin / 1e6,
         "Cache read": r["cache_read"] * pin * CACHE_READ_MULT / 1e6,
     }
 
@@ -176,6 +179,13 @@ def parse_claude(claude_dir):
             tok = inp + out + cc + cr
             if tok <= 0:
                 continue
+            # Cache writes split by TTL: 5-minute (1.25x) vs 1-hour (2x).
+            br = u.get("cache_creation")
+            if isinstance(br, dict):
+                cc5 = br.get("ephemeral_5m_input_tokens", 0)
+                cc1 = br.get("ephemeral_1h_input_tokens", 0)
+            else:
+                cc5, cc1 = cc, 0  # older logs: assume 5-minute
             mid, rid = msg.get("id"), o.get("requestId")
             key = (mid, rid) if (mid and rid) else o.get("uuid")
             if key in best and out <= best[key][0]:
@@ -190,6 +200,7 @@ def parse_claude(claude_dir):
                 "tokens": tok,
                 "input": inp, "output": out,
                 "cache_create": cc, "cache_read": cr,
+                "cache_create_5m": cc5, "cache_create_1h": cc1,
                 "reasoning": 0,  # Claude doesn't report reasoning separately
             })
     for _, rec in best.values():
@@ -254,6 +265,7 @@ def parse_codex(codex_dir):
                 "input": max(delta.get("input_tokens", 0) - cached, 0),
                 "output": delta.get("output_tokens", 0),
                 "cache_create": 0,
+                "cache_create_5m": 0, "cache_create_1h": 0,
                 "cache_read": cached,
                 "reasoning": delta.get("reasoning_output_tokens", 0),
             }
